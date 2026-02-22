@@ -3,8 +3,6 @@ import json
 import os
 import time
 import random
-from datetime import date
-
 from config import (
     ORIGIN, DESTINATIONS, NUM_ADULTS, NUM_CHILDREN,
     MAX_DURATION_HOURS, MAX_RETRIES,
@@ -14,7 +12,7 @@ from config import (
 from url_builder import build_award_url
 from scraper import create_browser, close_browser, scrape_page, random_delay
 from ai_parser import parse_flights_from_html
-from filter_and_rank import filter_flights, rank_by_miles
+from filter_and_rank import filter_flights
 from exporter import append_to_csv
 
 
