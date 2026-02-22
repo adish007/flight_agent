@@ -5,13 +5,18 @@ import os
 CSV_COLUMNS = [
     "destination",
     "city_name",
-    "date",
-    "departure_time",
-    "arrival_time",
-    "duration_hrs",
-    "num_stops",
-    "price",
-    "flight_numbers",
+    "depart_date",
+    "return_date",
+    "trip_days",
+    "outbound_price",
+    "return_price",
+    "total_price",
+    "outbound_airline",
+    "return_airline",
+    "outbound_duration_hrs",
+    "return_duration_hrs",
+    "outbound_stops",
+    "return_stops",
 ]
 
 
