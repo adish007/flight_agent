@@ -10,7 +10,7 @@ CSV_COLUMNS = [
     "arrival_time",
     "duration_hrs",
     "num_stops",
-    "miles_cost",
+    "price",
     "flight_numbers",
 ]
 

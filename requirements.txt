@@ -1,5 +1,3 @@
-playwright
-playwright-stealth
-openai
+fast-flights
 python-dotenv
 pandas

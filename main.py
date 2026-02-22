@@ -3,15 +3,21 @@ import json
 import os
 import time
 import random
+import re
+
 from config import (
-    ORIGIN, DESTINATIONS, NUM_ADULTS, NUM_CHILDREN,
-    MAX_DURATION_HOURS, MAX_RETRIES,
-    OUTPUT_FILE_ALL, OUTPUT_FILE_FILTERED, ERRORS_LOG, PROGRESS_FILE,
+    ORIGIN,
+    DESTINATIONS,
+    NUM_ADULTS,
+    MAX_DURATION_HOURS,
+    MAX_RETRIES,
+    OUTPUT_FILE_ALL,
+    OUTPUT_FILE_FILTERED,
+    ERRORS_LOG,
+    PROGRESS_FILE,
     generate_dates,
 )
-from url_builder import build_award_url
-from scraper import create_browser, close_browser, scrape_page, random_delay
-from ai_parser import parse_flights_from_html
+from scraper import search_flights, random_delay
 from filter_and_rank import filter_flights
 from exporter import append_to_csv
 
@@ -36,6 +42,39 @@ def log_error(destination: str, date_str: str, error: str) -> None:
         f.write(f"{destination},{date_str},{error}\n")
 
 
+def parse_duration_hrs(duration_str: str) -> float | None:
+    """Parse duration string like '6 hr 25 min' to decimal hours."""
+    if not duration_str:
+        return None
+    match = re.search(r"(\d+)\s*hr", duration_str)
+    hours = int(match.group(1)) if match else 0
+    match = re.search(r"(\d+)\s*min", duration_str)
+    minutes = int(match.group(1)) if match else 0
+    return hours + minutes / 60
+
+
+def parse_price(price_str: str) -> int | None:
+    """Parse price string like '$507' to integer cents."""
+    if not price_str:
+        return None
+    match = re.search(r"\$?([\d,]+)", price_str)
+    if match:
+        return int(match.group(1).replace(",", ""))
+    return None
+
+
+def parse_stops(stops_val) -> int:
+    """Parse stops value (str or int) to integer."""
+    if isinstance(stops_val, int):
+        return stops_val
+    if not stops_val or stops_val == "Unknown":
+        return -1
+    if "nonstop" in str(stops_val).lower():
+        return 0
+    match = re.search(r"(\d+)", str(stops_val))
+    return int(match.group(1)) if match else -1
+
+
 def main():
     dates = generate_dates()
     completed = load_progress()
@@ -45,14 +84,13 @@ def main():
     already_done = len(completed)
     remaining = total - already_done
 
-    print(f"AA Award Flight Search Agent")
+    print("Caribbean Flight Search Agent (via Google Flights)")
     print(f"Origin: {ORIGIN}")
     print(f"Destinations: {len(destinations)}")
     print(f"Date range: {dates[0]} to {dates[-1]} ({len(dates)} days)")
     print(f"Total searches: {total} | Already done: {already_done} | Remaining: {remaining}")
-    print(f"---")
+    print("---")
 
-    pw, browser, page = create_browser()
     count = 0
 
     try:
@@ -68,49 +106,72 @@ def main():
 
             for i, date_str in enumerate(dest_dates):
                 count += 1
-                print(f"  {date_str} ({i+1}/{len(dest_dates)}) [overall: {already_done + count}/{total}]", end=" ")
+                print(
+                    f"  {date_str} ({i+1}/{len(dest_dates)}) "
+                    f"[overall: {already_done + count}/{total}]",
+                    end=" ",
+                )
 
-                url = build_award_url(ORIGIN, dest_code, date_str, NUM_ADULTS, NUM_CHILDREN)
-
-                html = None
+                flights_raw = None
                 for attempt in range(MAX_RETRIES):
-                    html = scrape_page(page, url)
-                    if html and len(html) > 5000:
+                    flights_raw = search_flights(
+                        ORIGIN, dest_code, date_str, NUM_ADULTS, max_stops=1
+                    )
+                    if flights_raw:
                         break
                     if attempt < MAX_RETRIES - 1:
-                        wait = random.uniform(5, 15) * (attempt + 1)
+                        wait = random.uniform(3, 8) * (attempt + 1)
                         print(f"retry {attempt+1}...", end=" ")
                         time.sleep(wait)
 
-                if not html or len(html) < 5000:
-                    print("FAILED")
-                    log_error(dest_code, date_str, "page_load_failed")
+                if not flights_raw:
+                    print("no flights")
                     completed.add((dest_code, date_str))
                     save_progress(completed)
+                    random_delay()
                     continue
 
-                flights = parse_flights_from_html(html)
+                # Convert all flights to our CSV format
+                csv_flights = []
+                for f in flights_raw:
+                    duration_hrs = parse_duration_hrs(f.get("duration", ""))
+                    price = parse_price(f.get("price", ""))
+                    csv_flights.append(
+                        {
+                            "destination": dest_code,
+                            "city_name": city_name,
+                            "date": date_str,
+                            "departure_time": f.get("departure_time", ""),
+                            "arrival_time": f.get("arrival_time", ""),
+                            "duration_hrs": round(duration_hrs, 2) if duration_hrs else "",
+                            "num_stops": parse_stops(f.get("stops", "")),
+                            "price": price if price else "",
+                            "flight_numbers": f.get("airline", ""),
+                        }
+                    )
 
-                if not flights:
-                    print(f"no flights found")
+                # Save all flights
+                append_to_csv(csv_flights, OUTPUT_FILE_ALL)
+
+                # Filter by duration and save
+                filterable = [f for f in csv_flights if f["duration_hrs"] != ""]
+                filtered = filter_flights(filterable, MAX_DURATION_HOURS)
+                if filtered:
+                    append_to_csv(filtered, OUTPUT_FILE_FILTERED)
+                    best = min(
+                        filtered,
+                        key=lambda f: f.get("price", float("inf"))
+                        if f.get("price")
+                        else float("inf"),
+                    )
+                    print(
+                        f"{len(csv_flights)} flights, {len(filtered)} under {MAX_DURATION_HOURS}h, "
+                        f"best: ${best.get('miles_cost', '?')}"
+                    )
                 else:
-                    # Add destination metadata to each flight
-                    for flight in flights:
-                        flight["destination"] = dest_code
-                        flight["city_name"] = city_name
-                        flight["date"] = date_str
-
-                    # Save all flights
-                    append_to_csv(flights, OUTPUT_FILE_ALL)
-
-                    # Filter and save filtered flights
-                    filtered = filter_flights(flights, MAX_DURATION_HOURS)
-                    if filtered:
-                        append_to_csv(filtered, OUTPUT_FILE_FILTERED)
-                        best = min(filtered, key=lambda f: f.get("miles_cost", float("inf")))
-                        print(f"found {len(filtered)} flights, best: {best.get('miles_cost', '?')} miles")
-                    else:
-                        print(f"found {len(flights)} flights, none under {MAX_DURATION_HOURS}h")
+                    print(
+                        f"{len(csv_flights)} flights, none under {MAX_DURATION_HOURS}h"
+                    )
 
                 completed.add((dest_code, date_str))
                 save_progress(completed)
@@ -118,8 +179,6 @@ def main():
 
     except KeyboardInterrupt:
         print(f"\n\nInterrupted! Progress saved. {len(completed)} searches completed.")
-    finally:
-        close_browser(pw, browser)
 
     # Final summary
     print(f"\n{'='*60}")
@@ -127,13 +186,14 @@ def main():
     print(f"All flights: {OUTPUT_FILE_ALL}")
     print(f"Filtered flights (<{MAX_DURATION_HOURS}h): {OUTPUT_FILE_FILTERED}")
 
-    # Sort the filtered file by miles cost
+    # Sort the filtered file by price
     if os.path.exists(OUTPUT_FILE_FILTERED):
         import pandas as pd
+
         df = pd.read_csv(OUTPUT_FILE_FILTERED)
-        df = df.sort_values("miles_cost")
+        df = df.sort_values("price")
         df.to_csv(OUTPUT_FILE_FILTERED, index=False)
-        print(f"\nTop 10 deals:")
+        print(f"\nTop 10 cheapest flights (under {MAX_DURATION_HOURS}h):")
         print(df.head(10).to_string(index=False))
 
 

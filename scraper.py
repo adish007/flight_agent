@@ -1,47 +1,60 @@
 # scraper.py
-import random
 import time
-from playwright.sync_api import sync_playwright, Page, Browser
-from playwright_stealth import stealth_sync
+import random
+from fast_flights import FlightData, Passengers, get_flights
 from config import SLEEP_MIN_SEC, SLEEP_MAX_SEC
 
 
-def create_browser() -> tuple:
-    """Launch a stealth Playwright browser. Returns (playwright, browser, page)."""
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=False)
-    context = browser.new_context(
-        viewport={"width": random.randint(1200, 1400), "height": random.randint(800, 1000)},
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    )
-    page = context.new_page()
-    stealth_sync(page)
-    return pw, browser, page
+def search_flights(
+    origin: str,
+    destination: str,
+    date: str,
+    n_adults: int = 2,
+    max_stops: int | None = None,
+) -> list[dict]:
+    """Search Google Flights for flights on a given route and date.
 
-
-def close_browser(pw, browser) -> None:
-    """Cleanly close browser and playwright."""
-    browser.close()
-    pw.stop()
-
-
-def scrape_page(page: Page, url: str) -> str | None:
-    """Navigate to URL and return page HTML content, or None on failure."""
+    Returns a list of flight dicts with keys:
+    airline, departure_time, arrival_time, duration, stops, price
+    """
     try:
-        page.goto(url, wait_until="networkidle", timeout=30000)
-        # Wait for flight results to render
-        time.sleep(random.uniform(SLEEP_MIN_SEC, SLEEP_MAX_SEC))
-        # Try to wait for results container (adjust selector after inspecting AA.com)
-        try:
-            page.wait_for_selector("[class*='flight'], [class*='slice'], [class*='result']", timeout=15000)
-        except Exception:
-            pass  # Page may have loaded but with different structure
-        return page.content()
+        result = get_flights(
+            flight_data=[
+                FlightData(date=date, from_airport=origin, to_airport=destination)
+            ],
+            trip="one-way",
+            passengers=Passengers(adults=n_adults),
+            seat="economy",
+            max_stops=max_stops,
+            fetch_mode="fallback",
+        )
+
+        flights = []
+        seen = set()
+        for f in result.flights:
+            # Deduplicate (fast-flights sometimes returns duplicates)
+            key = (f.name, f.departure, f.arrival, f.price)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            flights.append(
+                {
+                    "airline": f.name,
+                    "departure_time": f.departure,
+                    "arrival_time": f.arrival,
+                    "duration": f.duration,
+                    "stops": f.stops,
+                    "price": f.price,
+                }
+            )
+
+        return flights
     except Exception as e:
-        print(f"  Error loading {url}: {e}")
-        return None
+        print(f"  Error searching {origin}->{destination} on {date}: {e}")
+        return []
 
 
 def random_delay() -> None:
-    """Sleep for a random duration to appear human."""
+    """Sleep for a random duration to be polite to the API."""
     time.sleep(random.uniform(SLEEP_MIN_SEC, SLEEP_MAX_SEC))
