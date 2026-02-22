@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+flights_all.csv
+flights_filtered.csv
+errors.log
+progress.json
