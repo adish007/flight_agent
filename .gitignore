@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 flights_all.csv
 flights_filtered.csv
+legs.csv
 errors.log
 progress.json
