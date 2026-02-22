@@ -1,4 +1,5 @@
 # main.py
+import argparse
 import json
 import os
 import re
@@ -15,16 +16,17 @@ from config import (
     MAX_RETRIES,
     MAX_WORKERS,
     TRIP_LENGTHS,
-    OUTPUT_FILE_ALL,
-    OUTPUT_FILE_FILTERED,
-    ERRORS_LOG,
-    PROGRESS_FILE,
     generate_dates,
 )
 from scraper import search_flights, random_delay
 
-# One-way legs CSV (intermediate data)
+RUNS_DIR = "runs"
+
+# File names (will be prefixed with run directory in main())
 LEGS_FILE = "legs.csv"
+OUTPUT_FILE_FILTERED = "flights_filtered.csv"
+ERRORS_LOG = "errors.log"
+PROGRESS_FILE = "progress.json"
 LEGS_COLUMNS = [
     "direction",  # "outbound" or "return"
     "destination",
@@ -148,22 +150,136 @@ def append_legs_csv(legs: list[dict]) -> None:
         writer.writerows(legs)
 
 
-def build_round_trips() -> None:
-    """Post-process: combine outbound + return legs into round trips for each trip length."""
-    if not os.path.exists(LEGS_FILE):
-        print("No legs data found.")
-        return
+EXCEL_REPORT_FILE = "flights_report.xlsx"  # set to run dir in main()
+BUDGET_AIRLINES = ["Frontier", "Spirit"]
+TOP_N = 5
 
-    df = pd.read_csv(LEGS_FILE)
-    outbound = df[df["direction"] == "outbound"].copy()
-    returns = df[df["direction"] == "return"].copy()
+REPORT_COLUMNS = {
+    "depart_date": "Depart",
+    "return_date": "Return",
+    "trip_days": "Days",
+    "total_price": "Total Price",
+    "outbound_airline": "Outbound Airline",
+    "return_airline": "Return Airline",
+    "outbound_duration_hrs": "Out Duration (hrs)",
+    "return_duration_hrs": "Ret Duration (hrs)",
+    "outbound_stops": "Out Stops",
+    "return_stops": "Ret Stops",
+}
+# Google Flights link column is appended after REPORT_COLUMNS
+
+
+def _build_google_flights_url(origin: str, dest: str, depart_date: str, return_date: str) -> str:
+    """Build a Google Flights search URL using the same encoding as fast-flights."""
+    from fast_flights import FlightData, Passengers
+    from fast_flights.flights_impl import TFSData
+
+    tfs = TFSData.from_interface(
+        flight_data=[
+            FlightData(date=depart_date, from_airport=origin, to_airport=dest),
+            FlightData(date=return_date, from_airport=dest, to_airport=origin),
+        ],
+        trip="round-trip",
+        passengers=Passengers(adults=NUM_ADULTS),
+        seat="economy",
+    )
+    encoded = tfs.as_b64().decode("utf-8")
+    return f"https://www.google.com/travel/flights?tfs={encoded}&hl=en&curr=USD"
+
+
+def _write_excel_sheet(ws, trips_df: pd.DataFrame) -> None:
+    """Write grouped top-5-per-destination data to an openpyxl worksheet."""
+    from openpyxl.styles import Font
+
+    bold = Font(bold=True)
+    header_font = Font(bold=True, size=13)
+    link_font = Font(color="0563C1", underline="single")
+    col_headers = list(REPORT_COLUMNS.values()) + ["Google Flights"]
+    link_col = len(REPORT_COLUMNS) + 1
+
+    row = 1
+    # Sort destinations alphabetically by city name
+    for dest, group in trips_df.groupby("city_name", sort=True):
+        dest_code = group.iloc[0]["destination"]
+        top = group.nsmallest(TOP_N, "total_price")
+
+        # Destination header
+        ws.cell(row=row, column=1, value=f"{dest} ({dest_code})").font = header_font
+        row += 1
+
+        # Column headers
+        for col_idx, header in enumerate(col_headers, start=1):
+            cell = ws.cell(row=row, column=col_idx, value=header)
+            cell.font = bold
+        row += 1
+
+        # Data rows
+        for _, trip in top.iterrows():
+            for col_idx, src_col in enumerate(REPORT_COLUMNS.keys(), start=1):
+                val = trip[src_col]
+                cell = ws.cell(row=row, column=col_idx, value=val)
+                if src_col == "total_price":
+                    cell.number_format = "$#,##0"
+
+            # Google Flights hyperlink
+            url = _build_google_flights_url(
+                ORIGIN, trip["destination"], trip["depart_date"], trip["return_date"]
+            )
+            cell = ws.cell(row=row, column=link_col, value="Search")
+            cell.hyperlink = url
+            cell.font = link_font
+
+            row += 1
+
+        # Blank separator row
+        row += 1
+
+    # Auto-fit column widths
+    for col_idx in range(1, len(col_headers) + 1):
+        max_len = 0
+        for r in range(1, row):
+            val = ws.cell(row=r, column=col_idx).value
+            if val is not None:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_len + 3
+
+
+def build_excel_report(trips_df: pd.DataFrame, legs_df: pd.DataFrame) -> None:
+    """Build a formatted Excel report with two tabs from round-trip data."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+
+    # Sheet 1: All Airlines
+    ws_all = wb.active
+    ws_all.title = "All Airlines"
+    _write_excel_sheet(ws_all, trips_df)
+
+    # Sheet 2: No Budget Airlines — filter budget airlines from raw legs FIRST,
+    # then rebuild round trips so non-budget options surface for every destination
+    budget_pattern = "|".join(BUDGET_AIRLINES)
+    non_budget_legs = legs_df[
+        ~legs_df["airline"].str.contains(budget_pattern, case=False, na=False)
+    ]
+    no_budget_trips = _combine_legs_into_trips(non_budget_legs)
+    ws_no_budget = wb.create_sheet("No Budget Airlines")
+    _write_excel_sheet(ws_no_budget, no_budget_trips)
+
+    wb.save(EXCEL_REPORT_FILE)
+    print(f"Excel report saved to {EXCEL_REPORT_FILE}")
+
+
+def _combine_legs_into_trips(legs_df: pd.DataFrame) -> pd.DataFrame:
+    """Combine outbound + return legs into round trips for each trip length.
+
+    Returns a DataFrame of round-trip combinations sorted by total_price.
+    """
+    outbound = legs_df[legs_df["direction"] == "outbound"].copy()
+    returns = legs_df[legs_df["direction"] == "return"].copy()
 
     if outbound.empty or returns.empty:
-        print("Not enough data for round trips.")
-        return
+        return pd.DataFrame()
 
-    # For each outbound leg, find the cheapest return for each trip length
-    # Group by destination and date to get cheapest one-way per date
     best_outbound = (
         outbound.sort_values("price")
         .groupby(["destination", "date"])
@@ -214,10 +330,24 @@ def build_round_trips() -> None:
             })
 
     if not trips:
+        return pd.DataFrame()
+
+    return pd.DataFrame(trips).sort_values("total_price")
+
+
+def build_round_trips() -> None:
+    """Post-process: combine outbound + return legs into round trips for each trip length."""
+    if not os.path.exists(LEGS_FILE):
+        print("No legs data found.")
+        return
+
+    df = pd.read_csv(LEGS_FILE)
+
+    trips_df = _combine_legs_into_trips(df)
+    if trips_df.empty:
         print("No valid round trips found.")
         return
 
-    trips_df = pd.DataFrame(trips).sort_values("total_price")
     trips_df.to_csv(OUTPUT_FILE_FILTERED, index=False)
 
     print(f"\nGenerated {len(trips_df)} round-trip combinations.")
@@ -229,9 +359,56 @@ def build_round_trips() -> None:
     ]
     print(trips_df[cols].head(20).to_string(index=False))
 
+    # Build formatted Excel report — pass raw legs so non-budget tab
+    # can rebuild trips from non-budget legs instead of just filtering trips
+    build_excel_report(trips_df, df)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Search Google Flights for cheap Caribbean round trips.")
+    parser.add_argument(
+        "--start-date", required=True,
+        help="Start date for search range (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end-date", required=True,
+        help="End date for search range (YYYY-MM-DD)",
+    )
+    args = parser.parse_args()
+    try:
+        start = date.fromisoformat(args.start_date)
+        end = date.fromisoformat(args.end_date)
+    except ValueError:
+        parser.error("Dates must be in YYYY-MM-DD format")
+    if start > end:
+        parser.error("--start-date must be before --end-date")
+    return start, end
+
 
 def main():
-    dates = generate_dates()
+    global LEGS_FILE, OUTPUT_FILE_FILTERED, ERRORS_LOG, PROGRESS_FILE, EXCEL_REPORT_FILE
+
+    start, end = parse_args()
+
+    # Create run directory: runs/<today>/run_N/
+    today = date.today().isoformat()
+    day_dir = os.path.join(RUNS_DIR, today)
+    os.makedirs(day_dir, exist_ok=True)
+
+    # Find next run number
+    existing = [d for d in os.listdir(day_dir) if d.startswith("run_") and os.path.isdir(os.path.join(day_dir, d))]
+    next_num = max((int(d.split("_")[1]) for d in existing), default=0) + 1
+    run_dir = os.path.join(day_dir, f"run_{next_num}")
+    os.makedirs(run_dir)
+
+    # Point all output files into the run directory
+    LEGS_FILE = os.path.join(run_dir, "legs.csv")
+    OUTPUT_FILE_FILTERED = os.path.join(run_dir, "flights_filtered.csv")
+    ERRORS_LOG = os.path.join(run_dir, "errors.log")
+    PROGRESS_FILE = os.path.join(run_dir, "progress.json")
+    EXCEL_REPORT_FILE = os.path.join(run_dir, "flights_report.xlsx")
+
+    dates = generate_dates(start, end)
     completed = load_progress()
     destinations = list(DESTINATIONS.items())
 
@@ -265,6 +442,7 @@ def main():
     already_done = len(completed)
 
     print("Caribbean Flight Search Agent (via Google Flights)")
+    print(f"Run output: {run_dir}")
     print(f"Origin: {ORIGIN}")
     print(f"Destinations: {len(destinations)}")
     print(f"Dates: {dates[0]} to {dates[-1]} ({len(dates)} days)")

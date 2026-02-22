@@ -32,12 +32,6 @@ SLEEP_MIN_SEC = 1
 SLEEP_MAX_SEC = 3
 MAX_RETRIES = 3
 
-# Output files
-OUTPUT_FILE_ALL = "flights_all.csv"
-OUTPUT_FILE_FILTERED = "flights_filtered.csv"
-ERRORS_LOG = "errors.log"
-PROGRESS_FILE = "progress.json"
-
 
 def generate_dates(start: date = None, end: date = None) -> list[str]:
     """Generate list of date strings YYYY-MM-DD for the search range."""

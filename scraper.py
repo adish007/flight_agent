@@ -4,6 +4,18 @@ import random
 from fast_flights import FlightData, Passengers, get_flights
 from config import SLEEP_MIN_SEC, SLEEP_MAX_SEC
 
+# Suppress "Impersonate 'chrome_126' does not exist" warning from fast-flights.
+# The library hardcodes an outdated browser profile; patching to None uses random silently.
+import fast_flights.core as _core
+_orig_fetch = _core.fetch
+def _quiet_fetch(params: dict):
+    from fast_flights.primp import Client
+    client = Client(impersonate=None, verify=False)
+    res = client.get("https://www.google.com/travel/flights", params=params)
+    assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
+    return res
+_core.fetch = _quiet_fetch
+
 
 def search_flights(
     origin: str,
