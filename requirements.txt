@@ -2,3 +2,4 @@ fast-flights
 python-dotenv
 pandas
 openpyxl
+playwright

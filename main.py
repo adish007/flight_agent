@@ -385,9 +385,32 @@ def parse_args():
     return start, end
 
 
+def _ensure_playwright():
+    """Auto-install Chromium for Playwright if not already installed."""
+    import subprocess
+    import shutil
+    # Check if chromium is already installed by looking for the browser
+    try:
+        from playwright._impl._driver import compute_driver_executable
+        driver = compute_driver_executable()
+        result = subprocess.run(
+            [str(driver), "install", "--dry-run", "chromium"],
+            capture_output=True, text=True
+        )
+        if "chromium" in result.stdout.lower():
+            print("Installing Chromium browser (one-time setup)...")
+            subprocess.run([str(driver), "install", "chromium"], check=True)
+    except Exception:
+        # Fallback: just run playwright install chromium
+        playwright_cmd = shutil.which("playwright")
+        if playwright_cmd:
+            subprocess.run([playwright_cmd, "install", "chromium"], check=True)
+
+
 def main():
     global LEGS_FILE, OUTPUT_FILE_FILTERED, ERRORS_LOG, PROGRESS_FILE, EXCEL_REPORT_FILE
 
+    _ensure_playwright()
     start, end = parse_args()
 
     # Create run directory: runs/<today>/run_N/
